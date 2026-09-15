@@ -15,8 +15,10 @@ Each service repo deploys on its own server, so it can't depend on this director
 
 ```toml
 [tool.uv.sources]
-agentkit = { path = "vendor/agentkit" }
+agentkit = { path = "vendor/agentkit", editable = true }
 ```
+
+The install is editable on purpose. A copied install of a local package keeps its old code after a sync: uv reuses its build while the version number is unchanged, so a redeploy would go on serving the previous agentkit.
 
 **Always change agentkit here**, run the tests here, then push the copies out:
 
