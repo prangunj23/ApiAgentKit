@@ -121,7 +121,7 @@ All agents serve the same routes, so the UI needs only each agent's URL. Run `ag
 | Area | Routes |
 |---|---|
 | Info | `GET /health`, `GET /api/info` |
-| Conversations | `GET/POST /api/conversations`, `GET /api/conversations/{id}`, `POST …/{id}/messages` (SSE), `POST …/{id}/confirm` (SSE), `GET /api/pending` |
+| Conversations | `GET/POST /api/conversations`, `GET /api/conversations/{id}`, `POST …/{id}/messages` (SSE), `POST …/{id}/confirm` (SSE), `GET …/{id}/stream` (SSE: replay and follow a turn in progress), `GET /api/pending` |
 | Agent-to-agent (needs `X-Agent-Token`) | `POST /api/agent-messages`, `POST /api/agent-messages/reply`, `POST /api/events/inbound` |
 | Data | `GET /api/emails[/{id}]`, `GET /api/events`, `GET /api/research[/{file}]`, `GET /api/memory`, `GET /api/codebase-map`, `POST /api/codebase-map/rebuild` |
 | Learning | `POST /api/messages/{id}/feedback`, `GET /api/learnings`, `POST /api/learnings/{id}`, `GET /api/pr-outcomes` |

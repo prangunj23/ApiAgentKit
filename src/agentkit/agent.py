@@ -12,6 +12,7 @@ from agentkit.llm import LLM, NimLLM
 from agentkit.memory import Memory, strip_markers
 from agentkit.registry import HttpFactory, Peers, default_http_factory
 from agentkit.research import Research
+from agentkit.runs import Runs
 from agentkit.spec import AgentSpec, Tool, ToolError
 from agentkit.store import Store
 from agentkit.tools import GENERIC_TOOLS
@@ -46,6 +47,7 @@ class Agent:
         self.tools: dict[str, Tool] = {tool.name: tool for tool in [*GENERIC_TOOLS, *spec.tools]}
         self._conversation_locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
+        self.runs = Runs(settings.secrets)
         self._stop = threading.Event()
 
     def tools_for(self, depth: int) -> list[Tool]:

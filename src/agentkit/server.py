@@ -71,6 +71,8 @@ class Conversation(BaseModel):
     created_at: str
     updated_at: str
     preview: str | None = None
+    # True while a turn is in progress on the server, whether or not anyone is streaming it.
+    running: bool = False
 
 
 class ToolCall(BaseModel):
@@ -257,10 +259,12 @@ class LearningDecision(BaseModel):
     body: str | None = None
 
 
-def sse(events: Iterator[dict[str, Any]]) -> StreamingResponse:
+def sse(events: Iterator[dict[str, Any] | None]) -> StreamingResponse:
     def body() -> Iterator[str]:
         for event in events:
-            yield f"event: {event['type']}\ndata: {json.dumps(event, default=str)}\n\n"
+            # None is a keep-alive: an SSE comment the client ignores. Writing it also lets the server
+            # notice a listener that has gone away, so the thread serving it stops waiting.
+            yield ": keep-alive\n\n" if event is None else f"event: {event['type']}\ndata: {json.dumps(event, default=str)}\n\n"
 
     return StreamingResponse(body(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -268,6 +272,7 @@ def sse(events: Iterator[dict[str, Any]]) -> StreamingResponse:
 def create_app(spec: AgentSpec, settings: Settings, *, llm: LLM | None = None, http_factory: HttpFactory = default_http_factory) -> FastAPI:
     agent = Agent(spec, settings, llm=llm, http_factory=http_factory)
     store = agent.store
+    runs = agent.runs
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -290,6 +295,9 @@ def create_app(spec: AgentSpec, settings: Settings, *, llm: LLM | None = None, h
             raise HTTPException(404, "Conversation not found")
         return conversation
 
+    def with_running(conversation: dict[str, Any]) -> dict[str, Any]:
+        return {**conversation, "running": runs.is_running(conversation["id"])}
+
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok", "agent": spec.id}
@@ -302,21 +310,31 @@ def create_app(spec: AgentSpec, settings: Settings, *, llm: LLM | None = None, h
 
     @app.get("/api/conversations", response_model=list[Conversation])
     def list_conversations(kind: Literal["user", "agent"] | None = None) -> list[dict[str, Any]]:
-        return store.list_conversations(kind)
+        return [with_running(conversation) for conversation in store.list_conversations(kind)]
 
     @app.post("/api/conversations", response_model=Conversation)
     def create_conversation(body: NewConversation) -> dict[str, Any]:
-        return store.create_conversation(kind="user", title=body.title)
+        return with_running(store.create_conversation(kind="user", title=body.title))
 
     @app.get("/api/conversations/{conversation_id}", response_model=ConversationDetail)
     def get_conversation(conversation_id: str) -> dict[str, Any]:
-        return {"conversation": conversation_or_404(conversation_id), "messages": store.list_messages(conversation_id)}
+        return {"conversation": with_running(conversation_or_404(conversation_id)), "messages": store.list_messages(conversation_id)}
+
+    # Each turn runs on its own thread (agentkit.runs) and a response only follows it. Reloading or closing
+    # the page ends the stream, not the turn; GET …/stream picks the turn up again.
 
     @app.post("/api/conversations/{conversation_id}/messages", responses=SSE_RESPONSE)
     def send_message(conversation_id: str, body: SendMessage) -> StreamingResponse:
         if conversation_or_404(conversation_id)["kind"] != "user":
             raise HTTPException(409, "Conversations between agents are read-only")
-        return sse(loop.run_turn(agent, conversation_id, body.message))
+        return sse(runs.start(conversation_id, loop.run_turn(agent, conversation_id, body.message)).follow())
+
+    @app.get("/api/conversations/{conversation_id}/stream", responses=SSE_RESPONSE)
+    def follow_turn(conversation_id: str) -> StreamingResponse:
+        """Replay the turn in progress from its first event, then follow it. Ends at once if none is running."""
+        conversation_or_404(conversation_id)
+        run = runs.get(conversation_id)
+        return sse(run.follow() if run else iter(()))
 
     @app.post("/api/conversations/{conversation_id}/confirm", responses=SSE_RESPONSE)
     def confirm(conversation_id: str, body: Decision) -> StreamingResponse:
@@ -326,7 +344,7 @@ def create_app(spec: AgentSpec, settings: Settings, *, llm: LLM | None = None, h
         events = loop.resume(agent, conversation_id, body.approve, body.reason)
         if conversation["kind"] == "agent" and conversation["channel"] == "agent_http":
             events = forward_reply(conversation, events)
-        return sse(events)
+        return sse(runs.start(conversation_id, events).follow())
 
     def forward_reply(conversation: dict[str, Any], events: Iterator[dict[str, Any]]) -> Iterator[dict[str, Any]]:
         """After the user decides for a thread another agent started, send the final reply back to that agent."""
@@ -350,7 +368,7 @@ def create_app(spec: AgentSpec, settings: Settings, *, llm: LLM | None = None, h
 
     @app.get("/api/pending", response_model=list[Conversation])
     def pending() -> list[dict[str, Any]]:
-        return store.pending_conversations()
+        return [with_running(conversation) for conversation in store.pending_conversations()]
 
     # Agent-to-agent
 
@@ -366,7 +384,8 @@ def create_app(spec: AgentSpec, settings: Settings, *, llm: LLM | None = None, h
             raise HTTPException(409, "That thread belongs to a different agent")
         if conversation["pending_action"]:
             return {"status": "awaiting_approval", "conversation_id": conversation["id"]}
-        result = loop.collect(loop.run_turn(agent, conversation["id"], body.message, sender=body.from_agent))
+        run = runs.start(conversation["id"], loop.run_turn(agent, conversation["id"], body.message, sender=body.from_agent))
+        result = loop.collect(event for event in run.follow() if event is not None)
         return {**result, "conversation_id": conversation["id"]}
 
     @app.post("/api/agent-messages/reply", response_model=Accepted)

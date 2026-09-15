@@ -1,6 +1,7 @@
 """The tool loop: stream the model, run tools, and pause for the user's approval on tools that need it.
 
-Every step is an event dict. The HTTP layer streams them as SSE; agent-to-agent calls collect them.
+Every step is an event dict. The HTTP layer runs each turn on its own thread (agentkit.runs) and streams its
+events as SSE to whoever is listening; agent-to-agent calls collect them.
 """
 
 import json
