@@ -1,4 +1,4 @@
-"""Tools every agent gets. Service-specific tools (and send_email) are added by each AgentSpec."""
+"""Tools every agent gets. Service-specific tools (and send_email, the owner and review tools) are added by each AgentSpec."""
 
 from agentkit.tools.agents import message_agent
 from agentkit.tools.github import open_pull_request
@@ -41,3 +41,6 @@ GENERIC_TOOLS = [
     propose_skill,
     read_skill,
 ]
+
+# Generic tools that change the agent's own repo. An agent without a repo excludes them.
+REPO_WRITE_TOOLS = frozenset({"write_file", "revert_changes", "run_tests", "sync_repo", "open_pull_request", "update_codebase_notes"})

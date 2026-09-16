@@ -71,12 +71,18 @@ def notify(ctx: ToolContext, text: str) -> str:
 
 ```sh
 uv run agentkit serve service1_agent.spec:SPEC --port 9001        # one agent (reads .env in the current directory)
-uv run agentkit dev --registry ../ApiAgentUI/public/registry.json # every agent with a `local` entry
+uv run agentkit dev --registry ../ApiAgentUI/public/registry.json # every agent with a `local` entry, plus onboarding on :9100
+uv run agentkit admin --registry R --developers-dir D --agent-url-base http://host  # the deployed onboarding service
+uv run agentkit inspect dev_agent.spec:dev_pranit [--depth 1]   # print a system prompt and tools, without a turn
+uv run agentkit inspect SPEC --review-context PR_URL             # print what review_pull_request returns
+uv run --extra mcp agentkit mcp --agent dev-pranit --registry R  # MCP server so Claude Code can talk to an agent
 uv run agentkit init --id service3 --repo owner/ApiAgentService3 \
     --reads owner/ApiAgentService1 --dir ../ApiAgentService3/chat_agent \
     --registry ../ApiAgentUI/public/registry.json                # scaffold a new agent and register it
 uv run agentkit openapi --out openapi.json                       # API schema for the UI's generated types
 ```
+
+Onboarding (`agentkit/onboarding.py`) owns `registry.json`: it adds developers, and serves the file at `/registry.json` so deployed agents can read it by URL. It uses `ONBOARDING_GITHUB_TOKEN` for repo invites and the email settings for welcome emails, and skips each step when its setting is missing.
 
 ## Configuration
 

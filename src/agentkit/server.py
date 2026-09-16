@@ -45,7 +45,9 @@ class AgentInfo(BaseModel):
     id: str
     name: str
     description: str
-    repo: RepoInfo
+    kind: str = "service"
+    # None for an agent that owns no repo, such as a developer's agent.
+    repo: RepoInfo | None
     reads: list[RepoInfo]
     features: list[str]
     tools: list[ToolInfo]
@@ -152,6 +154,21 @@ class CodebaseMapView(BaseModel):
     outdated: list[str]
 
 
+class OutboxItem(BaseModel):
+    id: str
+    recipient: str
+    headline: str
+    message: str
+    urgency: str
+    url: str | None
+    source_conversation_id: str | None
+    status: Literal["queued", "sent", "failed"]
+    attempts: int
+    error: str | None
+    created_at: str
+    updated_at: str
+
+
 class Learning(BaseModel):
     id: str
     kind: Literal["lesson", "skill"]
@@ -202,7 +219,8 @@ class WorkspaceView(BaseModel):
 
 
 class AgentMessageResult(BaseModel):
-    status: Literal["replied", "awaiting_approval", "error"]
+    # accepted: wait=false, the turn runs on. duplicate: this exact message is already in the thread.
+    status: Literal["replied", "awaiting_approval", "error", "accepted", "duplicate"]
     reply: str = ""
     error: str | None = None
     conversation_id: str
@@ -233,6 +251,8 @@ class AgentMessageIn(BaseModel):
     from_agent: str
     thread_id: str
     message: str = Field(min_length=1)
+    # False for notifications: answer as soon as the turn starts instead of when it ends.
+    wait: bool = True
 
 
 class AgentReplyIn(BaseModel):
@@ -288,6 +308,11 @@ def create_app(spec: AgentSpec, settings: Settings, *, llm: LLM | None = None, h
     @app.exception_handler(ToolError)
     async def tool_error(request: Request, exc: ToolError) -> JSONResponse:
         return JSONResponse({"detail": str(exc)}, status_code=400)
+
+    def check_sender(x_agent_token: str | None, from_agent: str) -> None:
+        check_agent_token(settings.shared_token, x_agent_token)
+        if not agent.peers.accepts(from_agent):
+            raise HTTPException(403, f"{spec.id} isn't linked to {from_agent} in the registry")
 
     def conversation_or_404(conversation_id: str) -> dict[str, Any]:
         conversation = store.get_conversation(conversation_id)
@@ -374,7 +399,7 @@ def create_app(spec: AgentSpec, settings: Settings, *, llm: LLM | None = None, h
 
     @app.post("/api/agent-messages", response_model=AgentMessageResult)
     def receive_agent_message(body: AgentMessageIn, x_agent_token: str | None = Header(default=None)) -> dict[str, Any]:
-        check_agent_token(settings.shared_token, x_agent_token)
+        check_sender(x_agent_token, body.from_agent)
         conversation = store.find_thread(body.thread_id)
         if conversation is None:
             conversation = store.create_conversation(
@@ -382,15 +407,24 @@ def create_app(spec: AgentSpec, settings: Settings, *, llm: LLM | None = None, h
             )
         elif conversation["peer_agent"] != body.from_agent:
             raise HTTPException(409, "That thread belongs to a different agent")
+        else:
+            # A sender that retries (after a restart or a timeout) must not start the same work twice.
+            messages = store.list_messages(conversation["id"])
+            for index, message in enumerate(messages):
+                if message["role"] == "user" and message["sender"] == body.from_agent and message["content"] == body.message:
+                    replies = [m["content"] for m in messages[index + 1 :] if m["role"] == "assistant" and m["content"]]
+                    return {"status": "duplicate", "reply": replies[-1] if replies else "", "conversation_id": conversation["id"]}
         if conversation["pending_action"]:
             return {"status": "awaiting_approval", "conversation_id": conversation["id"]}
         run = runs.start(conversation["id"], loop.run_turn(agent, conversation["id"], body.message, sender=body.from_agent))
+        if not body.wait:
+            return {"status": "accepted", "conversation_id": conversation["id"]}
         result = loop.collect(event for event in run.follow() if event is not None)
         return {**result, "conversation_id": conversation["id"]}
 
     @app.post("/api/agent-messages/reply", response_model=Accepted)
     def receive_agent_reply(body: AgentReplyIn, x_agent_token: str | None = Header(default=None)) -> dict[str, Any]:
-        check_agent_token(settings.shared_token, x_agent_token)
+        check_sender(x_agent_token, body.from_agent)
         conversation = store.find_thread(body.thread_id)
         if conversation is None or conversation["peer_agent"] != body.from_agent:
             raise HTTPException(404, "Thread not found")
@@ -400,7 +434,7 @@ def create_app(spec: AgentSpec, settings: Settings, *, llm: LLM | None = None, h
 
     @app.post("/api/events/inbound", response_model=Accepted)
     def inbound_event(body: InboundEvent, x_agent_token: str | None = Header(default=None)) -> dict[str, Any]:
-        check_agent_token(settings.shared_token, x_agent_token)
+        check_sender(x_agent_token, body.from_agent)
         agent.log_event(body.type, f"[from {body.from_agent}] {body.summary}", url=body.url)
         return {"ok": True}
 
@@ -415,6 +449,10 @@ def create_app(spec: AgentSpec, settings: Settings, *, llm: LLM | None = None, h
         if (email := store.get_email(email_id)) is None:
             raise HTTPException(404, "Email not found")
         return email
+
+    @app.get("/api/outbox", response_model=list[OutboxItem])
+    def list_outbox() -> list[dict[str, Any]]:
+        return store.list_outbox()
 
     @app.get("/api/events", response_model=list[Event])
     def list_events(limit: int = Query(50, ge=1, le=500)) -> list[dict[str, Any]]:
@@ -441,6 +479,8 @@ def create_app(spec: AgentSpec, settings: Settings, *, llm: LLM | None = None, h
 
     @app.post("/api/codebase-map/rebuild", response_model=Accepted, status_code=202)
     def rebuild_codebase_map() -> dict[str, Any]:
+        if not agent.codemap.enabled:
+            raise HTTPException(409, "This agent owns no repo, so it has no codebase map")
         if not agent.workspace.own.exists():
             raise HTTPException(409, "The repo isn't cloned yet")
         started = agent.codemap.schedule_update(full=True)
@@ -482,7 +522,7 @@ def create_app(spec: AgentSpec, settings: Settings, *, llm: LLM | None = None, h
     def sync_workspace() -> dict[str, Any]:
         notes = agent.workspace.ensure_cloned()
         notes += agent.sync_workspace()
-        if not agent.codemap.path.exists():
+        if agent.codemap.enabled and not agent.codemap.path.exists():
             agent.codemap.schedule_update()
         return {"repos": agent.workspace.status(), "notes": notes}
 

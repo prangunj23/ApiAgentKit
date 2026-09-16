@@ -1,7 +1,9 @@
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from agentkit.testing import FakeLLM
+from agentkit.tools.email import send as send_message
 from helpers import build_app, decide, send, service2_spec, start
 
 
@@ -51,3 +53,33 @@ def test_missing_email_settings_fail_clearly(tmp_path, remotes, monkeypatch):
     events = decide(client, conversation_id, True)
     assert events[1]["content"] == "Error: Missing email settings: RESEND_API_KEY"
     assert client.get("/api/emails").json()[0]["status"] == "failed"
+
+
+@pytest.mark.parametrize(("setting", "starttls"), [("", True), ("false", False)])
+def test_smtp_uses_starttls_unless_turned_off(monkeypatch, setting, starttls):
+    calls = []
+
+    class FakeSMTP:
+        def __init__(self, host, port, timeout):
+            calls.append(("connect", host, port))
+
+        def starttls(self):
+            calls.append(("starttls",))
+
+        def send_message(self, message):
+            calls.append(("send", message["To"]))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr("smtplib.SMTP", FakeSMTP)
+    monkeypatch.setenv("EMAIL_PROVIDER", "smtp")
+    monkeypatch.setenv("SMTP_HOST", "localhost")
+    monkeypatch.setenv("SMTP_PORT", "1025")
+    monkeypatch.setenv("SMTP_STARTTLS", setting)
+    send_message(["dev@example.com"], "Hi", "Hi", "<p>Hi</p>")
+    assert (("starttls",) in calls) is starttls
+    assert calls[-1] == ("send", "dev@example.com")

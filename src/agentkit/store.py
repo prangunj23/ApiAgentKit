@@ -1,4 +1,4 @@
-"""SQLite storage for one agent: conversations, messages, emails, events, feedback, learnings, PR outcomes.
+"""SQLite storage for one agent: conversations, messages, emails, events, feedback, learnings, PR outcomes, outbox.
 
 Columns ending in `_json` hold JSON; rows come back with the suffix dropped and the value decoded.
 """
@@ -96,6 +96,23 @@ CREATE TABLE IF NOT EXISTS pr_outcomes (
     merged INTEGER NOT NULL DEFAULT 0,
     review_comments_json TEXT NOT NULL DEFAULT '[]',
     checked_at TEXT NOT NULL
+);
+
+-- Notifications for other agents that are sent after the current turn, e.g. to a service's owners.
+CREATE TABLE IF NOT EXISTS outbox (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL UNIQUE,
+    recipient TEXT NOT NULL,
+    headline TEXT NOT NULL,
+    message TEXT NOT NULL,
+    urgency TEXT NOT NULL,
+    url TEXT,
+    source_conversation_id TEXT,
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS reflections (
@@ -434,3 +451,38 @@ class Store:
         for row in rows:
             row["merged"] = bool(row["merged"])
         return rows
+
+    # Outbox
+
+    def add_outbox(
+        self, *, recipient: str, headline: str, message: str, urgency: str, url: str | None = None, source_conversation_id: str | None = None
+    ) -> dict[str, Any]:
+        timestamp = now()
+        row = {
+            "id": new_id(),
+            "recipient": recipient,
+            "headline": headline,
+            "message": message,
+            "urgency": urgency,
+            "url": url,
+            "source_conversation_id": source_conversation_id,
+            "status": "queued",
+            "attempts": 0,
+            "error": None,
+            "created_at": timestamp,
+            "updated_at": timestamp,
+        }
+        self._insert("outbox", row)
+        return row
+
+    def queued_outbox(self) -> list[dict[str, Any]]:
+        return self._rows("SELECT * FROM outbox WHERE status = 'queued' ORDER BY seq")
+
+    def update_outbox(self, outbox_id: str, *, status: str, attempts: int, error: str | None = None) -> None:
+        self._execute(
+            "UPDATE outbox SET status = ?, attempts = ?, error = ?, updated_at = ? WHERE id = ?",
+            (status, attempts, error, now(), outbox_id),
+        )
+
+    def list_outbox(self, limit: int = 200) -> list[dict[str, Any]]:
+        return self._rows("SELECT * FROM outbox ORDER BY seq DESC LIMIT ?", (limit,))

@@ -10,6 +10,7 @@ from agentkit.gh import GitHub
 from agentkit.learning import Learning
 from agentkit.llm import LLM, NimLLM
 from agentkit.memory import Memory, strip_markers
+from agentkit.owners import deliver_outbox
 from agentkit.registry import HttpFactory, Peers, default_http_factory
 from agentkit.research import Research
 from agentkit.runs import Runs
@@ -42,16 +43,20 @@ class Agent:
         self.learning = Learning(self)
         self.llm: LLM = llm or NimLLM(settings)
         self.http_factory = http_factory
-        self.peers = Peers(settings.registry, spec.id, settings.shared_token, http_factory)
+        self.peers = Peers(settings.registry, spec.id, settings.shared_token, http_factory, cache_path=settings.data_dir / "registry-cache.json")
         self.github = GitHub(settings.github_token, http_factory(settings.github_api))
-        self.tools: dict[str, Tool] = {tool.name: tool for tool in [*GENERIC_TOOLS, *spec.tools]}
+        self.tools: dict[str, Tool] = {
+            tool.name: tool for tool in [*GENERIC_TOOLS, *spec.tools] if tool.name not in spec.excluded_tools
+        }
         self._conversation_locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
         self.runs = Runs(settings.secrets)
         self._stop = threading.Event()
+        self._outbox_wake = threading.Event()
+        self._outbox_lock = threading.Lock()
 
     def tools_for(self, depth: int) -> list[Tool]:
-        return [tool for tool in self.tools.values() if not (depth > 0 and tool.name == "message_agent")]
+        return [tool for tool in self.tools.values() if not (depth > 0 and tool.top_level_only)]
 
     def conversation_lock(self, conversation_id: str) -> threading.Lock:
         with self._locks_guard:
@@ -70,7 +75,8 @@ class Agent:
             "id": self.spec.id,
             "name": self.spec.name,
             "description": self.spec.description,
-            "repo": {"slug": self.spec.repo.slug, "name": self.spec.repo.name},
+            "repo": {"slug": self.spec.repo.slug, "name": self.spec.repo.name} if self.spec.repo else None,
+            "kind": entry.kind if (entry := self.peers.me()) else "service",
             "reads": [{"slug": ref.slug, "name": ref.name} for ref in self.spec.reads],
             "features": sorted(self.spec.features),
             "tools": [
@@ -81,23 +87,22 @@ class Agent:
 
     def system_prompt(self, depth: int) -> str:
         spec, own = self.spec, self.workspace.own
-        editable = ", ".join(f"{d}/" for d in own.ref.editable_dirs)
-        lines = [
-            spec.system_prompt.strip(),
-            "",
-            "# Operating context",
-            f"You are the `{spec.id}` agent ({spec.name}).",
-            f"- Your repo: {own.slug}. You may edit only {editable} in it, and you propose changes by opening a pull request.",
-        ]
-        if self.workspace.read_only:
-            names = ", ".join(f"{repo.slug} (`{repo.name}`)" for repo in self.workspace.read_only)
-            lines.append(f"- Read-only repos: {names}. Pass `repo` to the read tools to use them.")
-        if own.exists():
-            changed = own.changed_paths()
-            state = f"uncommitted changes in {', '.join(changed[:10])}" if changed else "no uncommitted changes"
-            lines.append(f"- Checkout: {own.branch()} at {own.head()[:7]}, {state}.")
+        lines = [spec.system_prompt.strip(), "", "# Operating context", f"You are the `{spec.id}` agent ({spec.name})."]
+        lines += self._people_lines()
+        read_only = ", ".join(f"{repo.slug} (`{repo.name}`)" for repo in self.workspace.read_only)
+        if own is None:
+            lines.append(f"- You own no repo. You can read: {read_only or 'none'}. Pass `repo` to the read tools.")
         else:
-            lines.append("- Your checkout isn't cloned yet; repo tools will fail until it is.")
+            editable = ", ".join(f"{d}/" for d in own.ref.editable_dirs)
+            lines.append(f"- Your repo: {own.slug}. You may edit only {editable} in it, and you propose changes by opening a pull request.")
+            if read_only:
+                lines.append(f"- Read-only repos: {read_only}. Pass `repo` to the read tools to use them.")
+            if own.exists():
+                changed = own.changed_paths()
+                state = f"uncommitted changes in {', '.join(changed[:10])}" if changed else "no uncommitted changes"
+                lines.append(f"- Checkout: {own.branch()} at {own.head()[:7]}, {state}.")
+            else:
+                lines.append("- Your checkout isn't cloned yet; repo tools will fail until it is.")
         confirm = [tool.name for tool in self.tools_for(depth) if tool.needs_confirmation]
         if confirm:
             lines.append(
@@ -136,6 +141,30 @@ class Agent:
                 lines += ["", f"# {title}", _clip(body.strip(), budget)]
         return "\n".join(lines)
 
+    def _people_lines(self) -> list[str]:
+        """Who this agent works for (a developer's agent) or who owns it (a service), from the registry."""
+        lines = []
+        developer = self.peers.developer_of(self.spec.id)
+        if developer:
+            github = f" (GitHub @{developer['github']})" if developer.get("github") else ""
+            lines.append(f"- You work for {developer.get('name', 'your developer')} <{developer.get('email', '')}>{github}.")
+            owned = self.peers.owned_by(self.spec.id)
+            if owned:
+                lines.append("- They own: " + ", ".join(f"`{entry.id}` ({entry.name})" for entry in owned) + ".")
+                oncall = [entry for entry in owned if entry.oncall == self.spec.id]
+                if oncall:
+                    lines.append("- They are on call for: " + ", ".join(f"`{entry.id}`" for entry in oncall) + ".")
+        owners = self.peers.owners()
+        if owners:
+            names = ", ".join(f"`{owner.id}` ({(owner.developer or {}).get('name', owner.name)})" for owner in owners)
+            oncall_owner = self.peers.oncall()
+            lines.append(
+                f"- This service is owned by {names}"
+                + (f"; `{oncall_owner.id}` is on call" if oncall_owner else "")
+                + ". Use notify_owners to tell them about anything they should know."
+            )
+        return lines
+
     # Background work
 
     def start_background(self) -> None:
@@ -143,15 +172,26 @@ class Agent:
             return
         threading.Thread(target=self._repo_loop, daemon=True, name=f"{self.spec.id}-repos").start()
         threading.Thread(target=self._pr_loop, daemon=True, name=f"{self.spec.id}-prs").start()
+        threading.Thread(target=self._outbox_loop, daemon=True, name=f"{self.spec.id}-outbox").start()
 
     def stop(self) -> None:
         self._stop.set()
+        self._outbox_wake.set()
+
+    def kick_outbox(self) -> None:
+        """Ask the outbox worker to deliver soon. Without background threads (tests), call deliver_outbox()."""
+        self._outbox_wake.set()
+
+    def deliver_outbox(self) -> int:
+        with self._outbox_lock:
+            return deliver_outbox(self)
 
     def _repo_loop(self) -> None:
         try:
             for note in self.workspace.ensure_cloned():
                 log.info(note)
-            self.codemap.update()
+            if self.codemap.enabled:
+                self.codemap.update()
         except Exception:
             log.exception("Workspace setup failed")
         while not self._stop.wait(self.settings.repo_poll_seconds):
@@ -170,6 +210,20 @@ class Agent:
             except Exception:
                 log.exception("Codebase map update failed after sync")
         return notes
+
+    def _outbox_loop(self) -> None:
+        while not self._stop.is_set():
+            # Wait for a kick, or poll so failed deliveries are retried.
+            self._outbox_wake.wait(self.settings.outbox_poll_seconds)
+            self._outbox_wake.clear()
+            if self._stop.is_set():
+                return
+            # Give the turn that queued the notification a moment to send its reply first.
+            self._stop.wait(self.settings.outbox_delay_seconds)
+            try:
+                self.deliver_outbox()
+            except Exception:
+                log.exception("Outbox delivery failed")
 
     def _pr_loop(self) -> None:
         while not self._stop.wait(self.settings.pr_poll_seconds):

@@ -50,6 +50,8 @@ class Settings:
     repo_poll_seconds: int = 300
     pr_poll_seconds: int = 900
     summary_delay_seconds: float = 60
+    outbox_poll_seconds: float = 60
+    outbox_delay_seconds: float = 2
 
     @property
     def allowed_hosts(self) -> set[str]:
@@ -57,7 +59,8 @@ class Settings:
 
     @property
     def secrets(self) -> list[str]:
-        return [self.nvidia_api_key, self.github_token, self.shared_token]
+        # Email credentials are read from the environment when mail is sent, so they're looked up here too.
+        return [self.nvidia_api_key, self.github_token, self.shared_token, env("RESEND_API_KEY"), env("SMTP_PASSWORD")]
 
     @classmethod
     def from_env(cls, agent_id: str, port: int) -> "Settings":

@@ -49,6 +49,8 @@ class Tool:
     # Called when the user denies a confirmation, with (ctx, args, reason).
     on_deny: Callable[..., None] | None = None
     max_result_chars: int = 20_000
+    # Hidden while answering another agent (depth 1), for tools that message other agents themselves.
+    top_level_only: bool = False
 
     def schema(self) -> dict[str, Any]:
         return {
@@ -65,6 +67,7 @@ def tool(
     *,
     needs_confirmation: bool = False,
     max_result_chars: int = 20_000,
+    top_level_only: bool = False,
 ) -> Callable[[Callable[..., str]], Tool]:
     """Turn `fn(ctx: ToolContext, **arguments) -> str` into a Tool."""
 
@@ -76,6 +79,7 @@ def tool(
             fn=fn,
             needs_confirmation=needs_confirmation,
             max_result_chars=max_result_chars,
+            top_level_only=top_level_only,
         )
 
     return wrap
@@ -97,14 +101,17 @@ def string_list(description: str) -> dict[str, Any]:
     return {"type": "array", "items": {"type": "string"}, "description": description}
 
 
-@dataclass
+@dataclass(kw_only=True)
 class AgentSpec:
     id: str
     name: str
-    repo: RepoRef
     system_prompt: str
+    # The repo the agent maintains. None for an agent that owns no code, such as a developer's agent.
+    repo: RepoRef | None = None
     reads: list[RepoRef] = field(default_factory=list)
     tools: list[Tool] = field(default_factory=list)
-    # Optional UI features, e.g. {"emails"}.
+    # Generic tools this agent doesn't get, e.g. the write tools for an agent without a repo.
+    excluded_tools: set[str] = field(default_factory=set)
+    # Optional features, e.g. {"emails"} (UI tab) or {"owner_inbox"} (triage inbound events).
     features: set[str] = field(default_factory=set)
     description: str = ""

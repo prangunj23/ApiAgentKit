@@ -55,3 +55,60 @@ def test_openapi_describes_the_agent_api(tmp_path):
         "/api/codebase-map",
     } <= set(schema["paths"])
     assert {"AgentInfo", "Conversation", "Message", "Email", "Learning"} <= set(schema["components"]["schemas"])
+
+
+def test_inspect_prints_the_prompt_and_tools(tmp_path, monkeypatch, capsys):
+    registry = tmp_path / "registry.json"
+    registry.write_text(json.dumps([{"id": "dev-ann", "url": "http://x", "kind": "developer", "developer": {"name": "Ann", "email": "ann@example.com"}}]))
+    (tmp_path / "inspect_spec.py").write_text(
+        "from agentkit import AgentSpec\n"
+        "from agentkit.tools import REPO_WRITE_TOOLS\n"
+        "from agentkit.tools.owner import notify_developer\n"
+        "SPEC = AgentSpec(id='dev-ann', name=\"Ann's agent\", system_prompt='You act for Ann.', tools=[notify_developer],"
+        " excluded_tools=set(REPO_WRITE_TOOLS))\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AGENT_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("AGENT_REGISTRY", str(registry))
+
+    main(["inspect", "inspect_spec:SPEC", "--depth", "1"])
+    out = capsys.readouterr().out
+    assert out.startswith("You act for Ann.\n\n# Operating context")
+    assert "- You work for Ann <ann@example.com>." in out
+    assert "- You are answering a message from another agent." in out
+    assert "# Tools the model can call (depth 1)" in out
+    assert "- notify_developer: Email the developer you work for." in out
+    assert "write_file" not in out and "message_agent" not in out
+
+
+def test_dev_refuses_an_inconsistent_registry(tmp_path):
+    registry = tmp_path / "registry.json"
+    registry.write_text(json.dumps([{"id": "a", "url": "http://a", "links": ["b"]}, {"id": "b", "url": "http://b", "links": []}]))
+    try:
+        main(["dev", "--registry", str(registry)])
+    except SystemExit as exit:
+        assert "a links to b, but b doesn't link back" in str(exit)
+    else:
+        raise AssertionError("dev started with an inconsistent registry")
+
+
+def test_dev_keeps_the_onboarding_token_from_the_agents(tmp_path, monkeypatch):
+    import subprocess
+
+    from agentkit import cli
+
+    captured = {}
+
+    class FakePopen:
+        stdout = iter(())
+
+        def __init__(self, command, cwd, env, **kwargs):
+            captured.update(env)
+
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+    monkeypatch.setenv("ONBOARDING_GITHUB_TOKEN", "gho_secret")
+    monkeypatch.setenv("RESEND_API_KEY", "re_shared")
+    cli._spawn(tmp_path / "registry.json", "shared", "dev-x", "http://127.0.0.1:9109", {"path": ".", "spec": "x:SPEC"})
+    assert "ONBOARDING_GITHUB_TOKEN" not in captured
+    assert captured["RESEND_API_KEY"] == "re_shared" and captured["AGENT_SHARED_TOKEN"] == "shared"

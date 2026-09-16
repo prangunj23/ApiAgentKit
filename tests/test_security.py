@@ -43,3 +43,13 @@ def test_research_files_cannot_escape_the_folder(tmp_path):
     client = TestClient(create_app(service1_spec(), make_settings(tmp_path), llm=FakeLLM()))
     assert client.get("/api/research/.codebase-map.json").status_code == 404
     assert client.get("/api/research/..%2Fagent.db").status_code == 404
+
+
+def test_email_credentials_are_redacted(tmp_path, monkeypatch):
+    from agentkit.security import redact
+    from agentkit.testing import make_settings
+
+    monkeypatch.setenv("SMTP_PASSWORD", "abcdefghijklmnop")
+    monkeypatch.setenv("RESEND_API_KEY", "re_1234567890")
+    secrets = make_settings(tmp_path).secrets
+    assert redact("login abcdefghijklmnop with re_1234567890", secrets) == "login *** with ***"

@@ -15,8 +15,14 @@ dependencies = [
 [project.scripts]
 agentkit = "agentkit.cli:main"
 
+[project.optional-dependencies]
+mcp = [
+    "mcp>=2.2",
+]
+
 [dependency-groups]
 dev = [
+    "mcp>=2.2",
     "pytest>=8",
 ]
 

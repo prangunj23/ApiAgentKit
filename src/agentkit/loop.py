@@ -19,7 +19,8 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 Event = dict[str, Any]
-MAX_ROUNDS = {0: 25, 1: 10}
+# Answering another agent gets fewer rounds, but enough to load a PR, read around it, email, and reply.
+MAX_ROUNDS = {0: 25, 1: 14}
 
 
 def depth_of(conversation: dict[str, Any]) -> int:

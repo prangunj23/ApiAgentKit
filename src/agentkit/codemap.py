@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from agentkit import frontmatter
+from agentkit import frontmatter, owners
 from agentkit.llm import complete_json
 from agentkit.research import MAP_FILE
 from agentkit.spec import ToolError
@@ -383,7 +383,12 @@ class CodeMap:
 
     @property
     def repo(self) -> Repo:
-        return self.agent.workspace.own
+        return self.agent.workspace.require_own()
+
+    @property
+    def enabled(self) -> bool:
+        """False for an agent that owns no repo: there is nothing to map."""
+        return self.agent.workspace.own is not None
 
     def load_state(self) -> dict[str, Any]:
         return json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
@@ -405,7 +410,7 @@ class CodeMap:
         self.path.write_text(frontmatter.dump(meta, body))
 
     def is_stale(self) -> bool:
-        return self.repo.exists() and self.load_state().get("commit") != self.repo.head()
+        return self.enabled and self.repo.exists() and self.load_state().get("commit") != self.repo.head()
 
     def view(self) -> dict[str, Any]:
         state = self.load_state()
@@ -481,6 +486,13 @@ class CodeMap:
             summary = f"Public contract of {repo.slug} changed at {head[:7]}"
             self.agent.log_event("contract_changed", summary)
             self.agent.peers.notify_dependents(repo.slug, {"type": "contract_changed", "summary": f"{summary}:\n{diff}"})
+            owners.queue(
+                self.agent,
+                headline=summary,
+                detail=f"The public contract changed. Consumers that keep their own copy of it fail at runtime, not at build time.\n\n```diff\n{diff}\n```",
+                urgency="needs_attention",
+                url=f"https://github.com/{repo.slug}/commit/{head}",
+            )
         return {"commit": head, "described": to_describe, "contract_changed": contract_changed}
 
     def schedule_update(self, *, full: bool = False) -> bool:
@@ -504,7 +516,7 @@ class CodeMap:
 
     def refresh_working_tree(self) -> None:
         """Re-extract facts from uncommitted edits. No LLM call."""
-        if not self.repo.exists() or not self.path.exists():
+        if not self.enabled or not self.repo.exists() or not self.path.exists():
             return
         with self._lock:
             self._save(collect(self.repo), self.load_state())
@@ -513,7 +525,7 @@ class CodeMap:
         with self._lock:
             state = self.load_state()
             state["notes"] = notes.strip()
-            if self.repo.exists():
+            if self.enabled and self.repo.exists():
                 self._save(collect(self.repo), state)
             else:
                 self.state_path.write_text(json.dumps(state, indent=2))

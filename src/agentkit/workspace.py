@@ -212,18 +212,24 @@ class Workspace:
     def __init__(self, root: Path, spec: AgentSpec, settings: Settings) -> None:
         self.root = root
         self.settings = settings
-        self.own = Repo(root / spec.repo.name, spec.repo, writable=True)
+        self.own = Repo(root / spec.repo.name, spec.repo, writable=True) if spec.repo else None
         self.read_only = [Repo(root / ref.name, ref, writable=False) for ref in spec.reads]
         self.holder: str | None = None
         self._claim_lock = threading.Lock()
         self.sync_lock = threading.Lock()
 
     def repos(self) -> list[Repo]:
-        return [self.own, *self.read_only]
+        return [self.own, *self.read_only] if self.own else list(self.read_only)
+
+    def require_own(self) -> Repo:
+        if self.own is None:
+            names = ", ".join(repo.name for repo in self.read_only) or "none"
+            raise ToolError(f"This agent owns no repo. Pass `repo` to use a read-only one: {names}.")
+        return self.own
 
     def repo(self, name: str | None = None) -> Repo:
         if not name:
-            return self.own
+            return self.require_own()
         key = name.lower()
         for repo in self.repos():
             if key in {repo.name.lower(), repo.slug.lower()}:
@@ -232,10 +238,11 @@ class Workspace:
 
     def claim(self, conversation_id: str) -> None:
         """Only one conversation at a time may have uncommitted changes in the agent's own repo."""
+        own = self.require_own()
         with self._claim_lock:
-            if self.holder and self.holder != conversation_id and self.own.is_dirty():
+            if self.holder and self.holder != conversation_id and own.is_dirty():
                 raise RepoBusyError(
-                    f"{self.own.name} has uncommitted changes from conversation {self.holder}. "
+                    f"{own.name} has uncommitted changes from conversation {self.holder}. "
                     "Open a PR or revert those changes first."
                 )
             self.holder = conversation_id
@@ -258,7 +265,7 @@ class Workspace:
             if not repo.exists():
                 run(["git", "clone", "--quiet", self.clone_url(repo.slug), str(repo.root)], self.root, timeout=600)
                 notes.append(f"Cloned {repo.slug}")
-        if not (self.own.root / ".venv").exists():
+        if self.own and not (self.own.root / ".venv").exists():
             try:
                 self.own.uv_sync()
                 notes.append(f"Installed dependencies in {self.own.name}")
@@ -277,6 +284,8 @@ class Workspace:
                 if repo.head() != before:
                     notes.append(f"Updated read-only {repo.name} to {repo.head()[:7]}")
 
+            if self.own is None:
+                return False, notes
             self.own.fetch()
             behind = self.own.behind()
             if not behind:

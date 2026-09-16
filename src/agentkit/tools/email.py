@@ -70,7 +70,9 @@ def _send_smtp(to: list[str], subject: str, text: str, html: str) -> None:
         server = smtplib.SMTP_SSL(host, port, timeout=30)
     else:
         server = smtplib.SMTP(host, port, timeout=30)
-        server.starttls()
+        # SMTP_STARTTLS=false is only for a local test catcher, which speaks plain SMTP.
+        if env("SMTP_STARTTLS", "true").lower() not in {"0", "false", "no"}:
+            server.starttls()
     with server:
         if username and password:
             server.login(username, password)
@@ -110,6 +112,11 @@ def send_email(ctx: ToolContext, subject: str, body_markdown: str, to: list[str]
     if not recipients:
         _record(ctx, recipients, subject, body_markdown, "failed", "No recipients")
         raise ToolError("No recipients. Pass `to` or set EMAIL_TO in the agent's .env.")
+    return deliver_email(ctx, recipients, subject, body_markdown)
+
+
+def deliver_email(ctx: ToolContext, recipients: list[str], subject: str, body_markdown: str) -> str:
+    """Send and record one email. Raises ToolError, after recording the failure, if it can't be sent."""
     if missing := missing_settings():
         error = f"Missing email settings: {', '.join(missing)}"
         _record(ctx, recipients, subject, body_markdown, "failed", error)

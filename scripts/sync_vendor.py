@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Copy this repo's agentkit into each service's chat_agent/vendor/agentkit.
+"""Copy this repo's agentkit into each service's chat_agent/vendor/agentkit, and into ApiAgentDevs/vendor/agentkit.
 
 The service repos each deploy on their own, so they carry a copy of agentkit rather than a
 path dependency on this directory. This repo stays the source of truth: edit agentkit here,
@@ -27,6 +27,7 @@ SOURCE = KIT_ROOT / "src" / "agentkit"
 TARGETS = (
     Path("ApiAgentService1") / "chat_agent" / "vendor" / "agentkit",
     Path("ApiAgentService2") / "chat_agent" / "vendor" / "agentkit",
+    Path("ApiAgentDevs") / "vendor" / "agentkit",
 )
 
 CHECK_VENDOR = KIT_ROOT / "scripts" / "check_vendor.py"

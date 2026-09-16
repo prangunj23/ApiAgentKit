@@ -20,7 +20,7 @@ def _branch(ctx: ToolContext) -> str:
 )
 def open_pull_request(ctx: ToolContext, title: str, body: str, draft: bool = False) -> str:
     agent, workspace = ctx.agent, ctx.agent.workspace
-    own = workspace.own
+    own = workspace.require_own()
     if workspace.holder and workspace.holder != ctx.conversation_id:
         raise RepoBusyError(f"The uncommitted changes belong to conversation {workspace.holder}.")
     paths = [path for path in own.changed_paths() if path.split("/")[0] in own.ref.editable_dirs or path == "uv.lock"]
@@ -49,7 +49,7 @@ def open_pull_request(ctx: ToolContext, title: str, body: str, draft: bool = Fal
 
 
 def _preview(ctx: ToolContext, title: str, body: str, draft: bool = False) -> str:
-    own = ctx.agent.workspace.own
+    own = ctx.agent.workspace.require_own()
     target = f"{_branch(ctx)} → {own.ref.branch}{' (draft)' if draft else ''}"
     return f"Repo: {own.slug}\nBranch: {target}\n\n{own.diffstat() or 'No changes.'}"
 
